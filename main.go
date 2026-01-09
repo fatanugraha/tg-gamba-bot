@@ -58,9 +58,8 @@ func statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	}
 
 	sort.Slice(users, func(i, j int) bool {
-		scoreI, scoreJ := users[i].Score(), users[j].Score()
-		if scoreI != scoreJ {
-			return scoreI > scoreJ
+		if users[i].Score != users[j].Score {
+			return users[i].Score > users[j].Score
 		}
 		if users[i].TotalGames != users[j].TotalGames {
 			return users[i].TotalGames < users[j].TotalGames
@@ -81,7 +80,7 @@ func statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 			name = fmt.Sprintf("User_%d", u.UserID)
 		}
 		msg += fmt.Sprintf("%d. %s - %d pts (7️⃣:%d 🍫:%d 🍒:%d 🍋:%d 🎰:%d)\n",
-			i+1, name, u.Score(), u.SevenWins, u.BarWins, u.CherryWins, u.LemonWins, u.TotalGames)
+			i+1, name, u.Score, u.SevenWins, u.BarWins, u.CherryWins, u.LemonWins, u.TotalGames)
 	}
 
 	b.SendMessage(ctx, &bot.SendMessageParams{
@@ -122,12 +121,16 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	switch left {
 	case barSlotFace:
 		userStat.BarWins += 1
+		userStat.Score += 50
 	case cherrySlotFace:
 		userStat.CherryWins += 1
+		userStat.Score += 10
 	case lemonSlotFace:
 		userStat.LemonWins += 1
+		userStat.Score += 20
 	case sevenSlotFace:
 		userStat.SevenWins += 1
+		userStat.Score += 100
 	default:
 		log.Printf("unexpected main.slotFace: %#v", left)
 	}

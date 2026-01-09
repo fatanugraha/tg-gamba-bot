@@ -26,17 +26,14 @@ func (v slotMachineValue) right() slotFace {
 }
 
 type stats struct {
-	UserID       int64 `gorm:"primaryKey"`
-	GroupID      int64 `gorm:"primaryKey"`
+	UserID       int64     `gorm:"primaryKey"`
+	GroupID      int64     `gorm:"primaryKey"`
 	Username     string
 	BarWins      int64
 	CherryWins   int64
 	LemonWins    int64
 	SevenWins    int64
 	TotalGames   int64
+	Score        int64
 	LastPlayedAt time.Time
-}
-
-func (u *stats) Score() int64 {
-	return u.SevenWins*100 + u.BarWins*50 + u.LemonWins*20 + u.CherryWins*10
 }
