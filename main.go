@@ -80,8 +80,8 @@ func statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		if name == "" {
 			name = fmt.Sprintf("User_%d", u.UserID)
 		}
-		msg += fmt.Sprintf("%d. %s - %d pts (🎰:%d 7️⃣:%d 🫒:%d 🍒:%d 🍋:%d)\n",
-			i+1, name, u.Score(), u.TotalGames, u.SevenWins, u.BarWins, u.CherryWins, u.LemonWins)
+		msg += fmt.Sprintf("%d. %s - %d pts (7️⃣:%d 🫒:%d 🍒:%d 🍋:%d 🎰:%d)\n",
+			i+1, name, u.Score(), u.SevenWins, u.BarWins, u.CherryWins, u.LemonWins, u.TotalGames)
 	}
 
 	b.SendMessage(ctx, &bot.SendMessageParams{
