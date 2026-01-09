@@ -80,7 +80,7 @@ func statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		if name == "" {
 			name = fmt.Sprintf("User_%d", u.UserID)
 		}
-		msg += fmt.Sprintf("%d. %s - %d pts (7️⃣:%d 🫒:%d 🍒:%d 🍋:%d 🎰:%d)\n",
+		msg += fmt.Sprintf("%d. %s - %d pts (7️⃣:%d 🍫:%d 🍒:%d 🍋:%d 🎰:%d)\n",
 			i+1, name, u.Score(), u.SevenWins, u.BarWins, u.CherryWins, u.LemonWins, u.TotalGames)
 	}
 
@@ -108,12 +108,14 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 
 	userStat.TotalGames += 1
 	userStat.LastPlayedAt = time.Unix(int64(update.Message.Date), 0)
-
-	left, center, right := v.left(), v.center(), v.right()
-	if left != center || center != right {
+	defer func() {
 		if err := saveStats(userStat); err != nil {
 			log.Printf("error saving user: %v", err)
 		}
+	}()
+
+	left, center, right := v.left(), v.center(), v.right()
+	if left != center || center != right {
 		return
 	}
 

@@ -14,15 +14,15 @@ const (
 type slotMachineValue int
 
 func (v slotMachineValue) left() slotFace {
-	return slotFace(v & 3)
+	return slotFace((v - 1) & 3)
 }
 
 func (v slotMachineValue) center() slotFace {
-	return slotFace((v >> 2) & 3)
+	return slotFace(((v - 1) >> 2) & 3)
 }
 
 func (v slotMachineValue) right() slotFace {
-	return slotFace((v >> 4) & 3)
+	return slotFace(((v - 1) >> 4) & 3)
 }
 
 type stats struct {
