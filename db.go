@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -8,8 +10,11 @@ import (
 var db *gorm.DB
 
 func initDB() error {
+	if err := os.MkdirAll("data", 0755); err != nil {
+		return err
+	}
 	var err error
-	db, err = gorm.Open(sqlite.Open("casino.db"), &gorm.Config{})
+	db, err = gorm.Open(sqlite.Open("data/casino.db"), &gorm.Config{})
 	if err != nil {
 		return err
 	}
