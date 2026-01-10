@@ -13,19 +13,27 @@ import (
 )
 
 func main() {
-	token := os.Getenv("TELEGRAM_BOT_TOKEN")
-	if token == "" {
-		log.Panic("TELEGRAM_BOT_TOKEN environment variable is not set")
+	botToken := os.Getenv("BOT_TOKEN")
+	if botToken == "" {
+		log.Panic("BOT_TOKEN environment variable is not set")
 	}
+
+	botUsername := os.Getenv("BOT_USERNAME")
+	if botUsername == "" {
+		log.Panic("BOT_USERNAME environment variable is not set")
+	}
+
+	svc := newCasinoController(botToken, botUsername)
 
 	if err := initDB(); err != nil {
 		log.Panic(err)
 	}
 
-	b, err := bot.New(
-		token,
-		bot.WithMessageTextHandler("/stats", bot.MatchTypeExact, statsHandler),
-		bot.WithDefaultHandler(handler),
+	tgBot, err := bot.New(
+		botToken,
+		bot.WithMessageTextHandler("/web", bot.MatchTypeExact, svc.webHandler),
+		bot.WithMessageTextHandler("/stats", bot.MatchTypeExact, svc.statsHandler),
+		bot.WithDefaultHandler(svc.diceHandler),
 		bot.WithWorkers(1),
 	)
 	if err != nil {
@@ -35,10 +43,39 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b.Start(ctx)
+	tgBot.Start(ctx)
 }
 
-func statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+type casinoController struct {
+	token    string
+	username string
+}
+
+func newCasinoController(token string, username string) *casinoController {
+	return &casinoController{
+		token:    token,
+		username: username,
+	}
+}
+
+func (c *casinoController) webHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.Message.Chat.ID,
+		Text:   "Welcome! Click the button below to launch the mini app.",
+		ReplyMarkup: &models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{
+					{
+						Text: "🎰 Open Mini App",
+						URL:  "https://t.me/normans_bot_casino?startapp",
+					},
+				},
+			},
+		},
+	})
+}
+
+func (*casinoController) statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	users, err := getUsersByGroup(update.Message.Chat.ID)
 	if err != nil {
 		log.Printf("error getting users: %v", err)
@@ -67,13 +104,8 @@ func statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		return users[i].LastPlayedAt.After(users[j].LastPlayedAt)
 	})
 
-	topN := 5
-	if len(users) < topN {
-		topN = len(users)
-	}
-
 	var msg string
-	for i := 0; i < topN; i++ {
+	for i := 0; i < len(users); i++ {
 		u := users[i]
 		name := u.Username
 		if name == "" {
@@ -89,8 +121,8 @@ func statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	})
 }
 
-func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	v, ok := parseSlotMachineMessage(update)
+func (c *casinoController) diceHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	v, ok := c.parseSlotMachineMessage(update)
 	if !ok {
 		return
 	}
@@ -140,7 +172,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	}
 }
 
-func parseSlotMachineMessage(update *models.Update) (slotMachineValue, bool) {
+func (*casinoController) parseSlotMachineMessage(update *models.Update) (slotMachineValue, bool) {
 	msg := update.Message
 	if msg == nil {
 		return 0, false
