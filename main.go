@@ -36,14 +36,14 @@ func main() {
 
 	tgBot, err := bot.New(
 		botToken,
-		bot.WithMessageTextHandler("/stats", bot.MatchTypeExact, svc.statsHandler),
-		bot.WithMessageTextHandler("/balance", bot.MatchTypeExact, svc.balanceHandler),
-		bot.WithMessageTextHandler("/duel", bot.MatchTypePrefix, svc.duelHandler),
-		bot.WithMessageTextHandler("/acceptDuel", bot.MatchTypeExact, svc.acceptDuelHandler),
-		bot.WithMessageTextHandler("/declineDuel", bot.MatchTypeExact, svc.declineDuelHandler),
-		bot.WithMessageTextHandler("/cancelDuel", bot.MatchTypeExact, svc.cancelDuelHandler),
-		bot.WithMessageTextHandler("/addBalance", bot.MatchTypePrefix, svc.addBalanceHandler),
-		bot.WithDefaultHandler(svc.defaultHandler),
+		bot.WithMessageTextHandler("/stats", bot.MatchTypeExact, svc.wrapHandler(svc.statsHandler)),
+		bot.WithMessageTextHandler("/balance", bot.MatchTypeExact, svc.wrapHandler(svc.balanceHandler)),
+		bot.WithMessageTextHandler("/duel", bot.MatchTypePrefix, svc.wrapHandler(svc.duelHandler)),
+		bot.WithMessageTextHandler("/acceptDuel", bot.MatchTypeExact, svc.wrapHandler(svc.acceptDuelHandler)),
+		bot.WithMessageTextHandler("/declineDuel", bot.MatchTypeExact, svc.wrapHandler(svc.declineDuelHandler)),
+		bot.WithMessageTextHandler("/cancelDuel", bot.MatchTypeExact, svc.wrapHandler(svc.cancelDuelHandler)),
+		bot.WithMessageTextHandler("/addBalance", bot.MatchTypePrefix, svc.wrapHandler(svc.addBalanceHandler)),
+		bot.WithDefaultHandler(svc.wrapHandler(svc.defaultHandler)),
 		bot.WithWorkers(1),
 	)
 	if err != nil {
@@ -54,6 +54,12 @@ func main() {
 	defer cancel()
 
 	tgBot.Start(ctx)
+}
+
+// BotInterface defines the methods we need from the bot
+type BotInterface interface {
+	SendMessage(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error)
+	SendDice(ctx context.Context, params *bot.SendDiceParams) (*models.Message, error)
 }
 
 type casinoController struct {
@@ -73,7 +79,14 @@ func newCasinoController(token string, username string, db *DB) *casinoControlle
 	}
 }
 
-func (c *casinoController) statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+// wrapHandler converts a handler using BotInterface to use *bot.Bot
+func (c *casinoController) wrapHandler(handler func(context.Context, BotInterface, *models.Update)) func(context.Context, *bot.Bot, *models.Update) {
+	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		handler(ctx, b, update)
+	}
+}
+
+func (c *casinoController) statsHandler(ctx context.Context, b BotInterface, update *models.Update) {
 	stats, err := c.db.GetStatsByGroup(update.Message.Chat.ID)
 	if err != nil {
 		log.Printf("error getting users: %v", err)
@@ -119,7 +132,7 @@ func (c *casinoController) statsHandler(ctx context.Context, b *bot.Bot, update 
 	})
 }
 
-func (c *casinoController) balanceHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (c *casinoController) balanceHandler(ctx context.Context, b BotInterface, update *models.Update) {
 	balances, err := c.db.GetBalancesByGroup(update.Message.Chat.ID)
 	if err != nil {
 		log.Printf("error getting balances: %v", err)
@@ -162,7 +175,7 @@ func (c *casinoController) balanceHandler(ctx context.Context, b *bot.Bot, updat
 	})
 }
 
-func (c *casinoController) defaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (c *casinoController) defaultHandler(ctx context.Context, b BotInterface, update *models.Update) {
 	// Debug: print raw JSON
 	if jsonBytes, err := json.Marshal(update); err == nil {
 		fmt.Printf("Raw update: %s\n", string(jsonBytes))
@@ -175,7 +188,7 @@ func (c *casinoController) defaultHandler(ctx context.Context, b *bot.Bot, updat
 	}
 }
 
-func (c *casinoController) duelHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (c *casinoController) duelHandler(ctx context.Context, b BotInterface, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
@@ -291,7 +304,7 @@ func (c *casinoController) duelHandler(ctx context.Context, b *bot.Bot, update *
 	})
 }
 
-func (c *casinoController) acceptDuelHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (c *casinoController) acceptDuelHandler(ctx context.Context, b BotInterface, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
@@ -448,7 +461,7 @@ func (c *casinoController) acceptDuelHandler(ctx context.Context, b *bot.Bot, up
 	})
 }
 
-func (c *casinoController) declineDuelHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (c *casinoController) declineDuelHandler(ctx context.Context, b BotInterface, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
@@ -484,7 +497,7 @@ func (c *casinoController) declineDuelHandler(ctx context.Context, b *bot.Bot, u
 	})
 }
 
-func (c *casinoController) cancelDuelHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (c *casinoController) cancelDuelHandler(ctx context.Context, b BotInterface, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
@@ -520,7 +533,7 @@ func (c *casinoController) cancelDuelHandler(ctx context.Context, b *bot.Bot, up
 	})
 }
 
-func (c *casinoController) addBalanceHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+func (c *casinoController) addBalanceHandler(ctx context.Context, b BotInterface, update *models.Update) {
 	if update.Message == nil {
 		return
 	}
@@ -605,7 +618,7 @@ func (c *casinoController) addBalanceHandler(ctx context.Context, b *bot.Bot, up
 	})
 }
 
-func (c *casinoController) handleSlotMachine(ctx context.Context, b *bot.Bot, update *models.Update, v slotMachineValue) {
+func (c *casinoController) handleSlotMachine(ctx context.Context, b BotInterface, update *models.Update, v slotMachineValue) {
 	userID := update.Message.From.ID
 	username := update.Message.From.Username
 	groupID := update.Message.Chat.ID
