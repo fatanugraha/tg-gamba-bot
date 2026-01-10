@@ -1,7 +1,5 @@
 package main
 
-import "time"
-
 type slotFace int
 
 const (
@@ -25,15 +23,3 @@ func (v slotMachineValue) right() slotFace {
 	return slotFace(((v - 1) >> 4) & 3)
 }
 
-type stats struct {
-	UserID       int64     `gorm:"primaryKey"`
-	GroupID      int64     `gorm:"primaryKey"`
-	Username     string
-	BarWins      int64
-	CherryWins   int64
-	LemonWins    int64
-	SevenWins    int64
-	TotalGames   int64
-	Score        int64
-	LastPlayedAt time.Time
-}

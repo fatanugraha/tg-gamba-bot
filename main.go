@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -23,16 +24,17 @@ func main() {
 		log.Panic("BOT_USERNAME environment variable is not set")
 	}
 
-	svc := newCasinoController(botToken, botUsername)
-
-	if err := initDB(); err != nil {
+	db, err := OpenDB()
+	if err != nil {
 		log.Panic(err)
 	}
 
+	svc := newCasinoController(botToken, botUsername, db)
+
 	tgBot, err := bot.New(
 		botToken,
-		bot.WithMessageTextHandler("/web", bot.MatchTypeExact, svc.webHandler),
 		bot.WithMessageTextHandler("/stats", bot.MatchTypeExact, svc.statsHandler),
+		bot.WithMessageTextHandler("/balance", bot.MatchTypeExact, svc.balanceHandler),
 		bot.WithDefaultHandler(svc.diceHandler),
 		bot.WithWorkers(1),
 	)
@@ -49,34 +51,19 @@ func main() {
 type casinoController struct {
 	token    string
 	username string
+	db       *DB
 }
 
-func newCasinoController(token string, username string) *casinoController {
+func newCasinoController(token string, username string, db *DB) *casinoController {
 	return &casinoController{
 		token:    token,
 		username: username,
+		db:       db,
 	}
 }
 
-func (c *casinoController) webHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   "Welcome! Click the button below to launch the mini app.",
-		ReplyMarkup: &models.InlineKeyboardMarkup{
-			InlineKeyboard: [][]models.InlineKeyboardButton{
-				{
-					{
-						Text: "🎰 Open Mini App",
-						URL:  "https://t.me/normans_bot_casino?startapp",
-					},
-				},
-			},
-		},
-	})
-}
-
-func (*casinoController) statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	users, err := getUsersByGroup(update.Message.Chat.ID)
+func (c *casinoController) statsHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	stats, err := c.db.GetStatsByGroup(update.Message.Chat.ID)
 	if err != nil {
 		log.Printf("error getting users: %v", err)
 		b.SendMessage(ctx, &bot.SendMessageParams{
@@ -86,7 +73,7 @@ func (*casinoController) statsHandler(ctx context.Context, b *bot.Bot, update *m
 		return
 	}
 
-	if len(users) == 0 {
+	if len(stats) == 0 {
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: update.Message.Chat.ID,
 			Text:   "No stats yet.",
@@ -94,25 +81,68 @@ func (*casinoController) statsHandler(ctx context.Context, b *bot.Bot, update *m
 		return
 	}
 
-	sort.Slice(users, func(i, j int) bool {
-		if users[i].Score != users[j].Score {
-			return users[i].Score > users[j].Score
+	sort.Slice(stats, func(i, j int) bool {
+		if stats[i].Score != stats[j].Score {
+			return stats[i].Score > stats[j].Score
 		}
-		if users[i].TotalGames != users[j].TotalGames {
-			return users[i].TotalGames < users[j].TotalGames
+		if stats[i].TotalGames != stats[j].TotalGames {
+			return stats[i].TotalGames < stats[j].TotalGames
 		}
-		return users[i].LastPlayedAt.After(users[j].LastPlayedAt)
+		return stats[i].LastPlayedAt.After(stats[j].LastPlayedAt)
 	})
 
 	var msg string
-	for i := 0; i < len(users); i++ {
-		u := users[i]
+	for i := 0; i < len(stats); i++ {
+		u := stats[i]
 		name := u.Username
 		if name == "" {
 			name = fmt.Sprintf("User_%d", u.UserID)
 		}
 		msg += fmt.Sprintf("%d. %s - %d pts (7️⃣:%d 🍫:%d 🍒:%d 🍋:%d 🎰:%d)\n",
 			i+1, name, u.Score, u.SevenWins, u.BarWins, u.CherryWins, u.LemonWins, u.TotalGames)
+	}
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: update.Message.Chat.ID,
+		Text:   msg,
+	})
+}
+
+func (c *casinoController) balanceHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	balances, err := c.db.GetBalancesByGroup(update.Message.Chat.ID)
+	if err != nil {
+		log.Printf("error getting balances: %v", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Error getting balances.",
+		})
+		return
+	}
+
+	if len(balances) == 0 {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "No balances yet.",
+		})
+		return
+	}
+
+	sort.Slice(balances, func(i, j int) bool {
+		return balances[i].Amount > balances[j].Amount
+	})
+
+	var msg string
+	for i := 0; i < len(balances); i++ {
+		bal := balances[i]
+		stats, err := c.db.GetOrCreateStats(bal.UserID, bal.GroupID, "")
+		if err != nil {
+			continue
+		}
+		name := stats.Username
+		if name == "" {
+			name = fmt.Sprintf("User_%d", bal.UserID)
+		}
+		msg += fmt.Sprintf("%d. %s - %d$\n", i+1, name, bal.Amount)
 	}
 
 	b.SendMessage(ctx, &bot.SendMessageParams{
@@ -128,20 +158,31 @@ func (c *casinoController) diceHandler(ctx context.Context, b *bot.Bot, update *
 	}
 
 	userID := update.Message.From.ID
-	groupID := update.Message.Chat.ID
 	username := update.Message.From.Username
+	groupID := update.Message.Chat.ID
 
-	userStat, err := getOrCreateStats(userID, groupID, username)
-	if err != nil {
+	if _, err := c.db.GetOrCreateStats(userID, groupID, username); err != nil {
 		log.Printf("error getting user: %v", err)
 		return
 	}
+	if _, err := c.db.GetOrCreateBalance(userID, groupID); err != nil {
+		log.Printf("error getting balance: %v", err)
+		return
+	}
 
-	userStat.TotalGames += 1
-	userStat.LastPlayedAt = time.Unix(int64(update.Message.Date), 0)
+	delta := StatsDelta{TotalGames: 1, Score: 0}
+	lastPlayedAt := time.Unix(int64(update.Message.Date), 0)
 	defer func() {
-		if err := saveStats(userStat); err != nil {
-			log.Printf("error saving user: %v", err)
+		if err := c.db.Transaction(func(tx *gorm.DB) error {
+			if err := c.db.UpdateStats(tx, userID, groupID, lastPlayedAt, delta); err != nil {
+				return err
+			}
+			if err := c.db.UpdateBalance(tx, userID, groupID, delta.Score); err != nil {
+				return err
+			}
+			return nil
+		}); err != nil {
+			log.Printf("error saving: %v", err)
 		}
 	}()
 
@@ -152,23 +193,19 @@ func (c *casinoController) diceHandler(ctx context.Context, b *bot.Bot, update *
 
 	switch left {
 	case barSlotFace:
-		userStat.BarWins += 1
-		userStat.Score += 50
+		delta.BarWins = 1
+		delta.Score = 50
 	case cherrySlotFace:
-		userStat.CherryWins += 1
-		userStat.Score += 10
+		delta.CherryWins = 1
+		delta.Score = 10
 	case lemonSlotFace:
-		userStat.LemonWins += 1
-		userStat.Score += 20
+		delta.LemonWins = 1
+		delta.Score = 20
 	case sevenSlotFace:
-		userStat.SevenWins += 1
-		userStat.Score += 100
+		delta.SevenWins = 1
+		delta.Score = 100
 	default:
 		log.Printf("unexpected main.slotFace: %#v", left)
-	}
-
-	if err := saveStats(userStat); err != nil {
-		log.Printf("error saving user: %v", err)
 	}
 }
 
