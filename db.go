@@ -31,6 +31,15 @@ type Balance struct {
 	Amount  int64
 }
 
+type PendingDuel struct {
+	InitiatorID   int64
+	TargetID      int64
+	GroupID       int64
+	TargetName    string
+	InitiatorName string
+	ExpiresAt     time.Time
+}
+
 func OpenDB() (*DB, error) {
 	if err := os.MkdirAll("data", 0755); err != nil {
 		return nil, err
@@ -116,4 +125,15 @@ func (db *DB) GetBalancesByGroup(groupID int64) ([]Balance, error) {
 	var results []Balance
 	err := db.Where("group_id = ?", groupID).Find(&results).Error
 	return results, err
+}
+
+func (db *DB) TransferBalance(tx *gorm.DB, fromUserID, toUserID, groupID int64, amount int64) error {
+	if err := tx.Model(&Balance{}).
+		Where("user_id = ? AND group_id = ?", fromUserID, groupID).
+		Update("amount", gorm.Expr("amount - ?", amount)).Error; err != nil {
+		return err
+	}
+	return tx.Model(&Balance{}).
+		Where("user_id = ? AND group_id = ?", toUserID, groupID).
+		Update("amount", gorm.Expr("amount + ?", amount)).Error
 }

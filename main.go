@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -35,7 +38,12 @@ func main() {
 		botToken,
 		bot.WithMessageTextHandler("/stats", bot.MatchTypeExact, svc.statsHandler),
 		bot.WithMessageTextHandler("/balance", bot.MatchTypeExact, svc.balanceHandler),
-		bot.WithDefaultHandler(svc.diceHandler),
+		bot.WithMessageTextHandler("/duel", bot.MatchTypePrefix, svc.duelHandler),
+		bot.WithMessageTextHandler("/acceptDuel", bot.MatchTypeExact, svc.acceptDuelHandler),
+		bot.WithMessageTextHandler("/declineDuel", bot.MatchTypeExact, svc.declineDuelHandler),
+		bot.WithMessageTextHandler("/cancelDuel", bot.MatchTypeExact, svc.cancelDuelHandler),
+		bot.WithMessageTextHandler("/addBalance", bot.MatchTypePrefix, svc.addBalanceHandler),
+		bot.WithDefaultHandler(svc.defaultHandler),
 		bot.WithWorkers(1),
 	)
 	if err != nil {
@@ -49,16 +57,19 @@ func main() {
 }
 
 type casinoController struct {
-	token    string
-	username string
-	db       *DB
+	token          string
+	username       string
+	db             *DB
+	pendingDuels   map[int64]*PendingDuel // groupID -> PendingDuel
+	pendingDuelsMu sync.RWMutex
 }
 
 func newCasinoController(token string, username string, db *DB) *casinoController {
 	return &casinoController{
-		token:    token,
-		username: username,
-		db:       db,
+		token:        token,
+		username:     username,
+		db:           db,
+		pendingDuels: make(map[int64]*PendingDuel),
 	}
 }
 
@@ -151,12 +162,450 @@ func (c *casinoController) balanceHandler(ctx context.Context, b *bot.Bot, updat
 	})
 }
 
-func (c *casinoController) diceHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
-	v, ok := c.parseSlotMachineMessage(update)
-	if !ok {
+func (c *casinoController) defaultHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	// Debug: print raw JSON
+	if jsonBytes, err := json.Marshal(update); err == nil {
+		fmt.Printf("Raw update: %s\n", string(jsonBytes))
+	}
+
+	// Handle slot machine dice
+	if v, ok := c.parseSlotMachineMessage(update); ok {
+		c.handleSlotMachine(ctx, b, update, v)
+		return
+	}
+}
+
+func (c *casinoController) duelHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
 		return
 	}
 
+	groupID := update.Message.Chat.ID
+	initiatorID := update.Message.From.ID
+	initiatorName := update.Message.From.Username
+
+	// Parse target username
+	args := strings.TrimSpace(strings.TrimPrefix(update.Message.Text, "/duel"))
+	if args == "" {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "Usage: /duel <username>",
+		})
+		return
+	}
+
+	targetUsername := strings.TrimPrefix(args, "@")
+
+	// Find target user in the group by checking balances
+	balances, err := c.db.GetBalancesByGroup(groupID)
+	if err != nil {
+		log.Printf("error getting users: %v", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "Error getting users.",
+		})
+		return
+	}
+
+	var targetID int64
+	var targetFound bool
+	var targetBalance int64
+	for _, bal := range balances {
+		// Get username from stats
+		stat, err := c.db.GetOrCreateStats(bal.UserID, groupID, "")
+		if err != nil {
+			continue
+		}
+		if stat.Username == targetUsername {
+			targetID = bal.UserID
+			targetBalance = bal.Amount
+			targetFound = true
+			break
+		}
+	}
+
+	if !targetFound || targetBalance <= 0 {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "The target is too poor to be challenged",
+		})
+		return
+	}
+
+	// Check if target is too poor
+	if targetBalance <= 0 {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "The target is too poor to be challenged",
+		})
+		return
+	}
+
+	if targetID == initiatorID {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "You cannot duel yourself!",
+		})
+		return
+	}
+
+	// Check if there's already a pending duel in this group
+	c.pendingDuelsMu.Lock()
+	defer c.pendingDuelsMu.Unlock()
+
+	if existingDuel, exists := c.pendingDuels[groupID]; exists {
+		// Check if existing duel has expired
+		if time.Now().Before(existingDuel.ExpiresAt) {
+			b.SendMessage(ctx, &bot.SendMessageParams{
+				ChatID: groupID,
+				Text:   "There is already a pending duel in this group.",
+			})
+			return
+		}
+		// Remove expired duel
+		delete(c.pendingDuels, groupID)
+	}
+
+	// Store pending duel
+	c.pendingDuels[groupID] = &PendingDuel{
+		InitiatorID:   initiatorID,
+		TargetID:      targetID,
+		GroupID:       groupID,
+		TargetName:    targetUsername,
+		InitiatorName: initiatorName,
+		ExpiresAt:     time.Now().Add(10 * time.Minute),
+	}
+
+	// Get initiator balance for display
+	initiatorBalance, err := c.db.GetOrCreateBalance(initiatorID, groupID)
+	if err != nil {
+		log.Printf("error getting initiator balance: %v", err)
+		return
+	}
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: groupID,
+		Text: fmt.Sprintf("@%s (%d$) has challenged @%s (%d$) to a duel!\n\nRules: 🎲 Even = @%s wins, Odd = @%s wins\n\n@%s, type /acceptDuel to accept or /declineDuel to decline.",
+			initiatorName, initiatorBalance.Amount, targetUsername, targetBalance,
+			initiatorName, targetUsername, targetUsername),
+	})
+}
+
+func (c *casinoController) acceptDuelHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+
+	groupID := update.Message.Chat.ID
+	targetID := update.Message.From.ID
+	messageID := update.Message.ID
+
+	c.pendingDuelsMu.Lock()
+	defer c.pendingDuelsMu.Unlock()
+
+	pendingDuel, exists := c.pendingDuels[groupID]
+	if !exists {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          groupID,
+			Text:            "No pending duel in this group.",
+			ReplyParameters: &models.ReplyParameters{MessageID: messageID},
+		})
+		return
+	}
+
+	if pendingDuel.TargetID != targetID {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          groupID,
+			Text:            "This duel is not for you!",
+			ReplyParameters: &models.ReplyParameters{MessageID: messageID},
+		})
+		return
+	}
+
+	// Get balances
+	initiatorBalance, err := c.db.GetOrCreateBalance(pendingDuel.InitiatorID, groupID)
+	if err != nil {
+		log.Printf("error getting initiator balance: %v", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          groupID,
+			Text:            "Error getting balances.",
+			ReplyParameters: &models.ReplyParameters{MessageID: messageID},
+		})
+		return
+	}
+
+	targetBalance, err := c.db.GetOrCreateBalance(targetID, groupID)
+	if err != nil {
+		log.Printf("error getting target balance: %v", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          groupID,
+			Text:            "Error getting balances.",
+			ReplyParameters: &models.ReplyParameters{MessageID: messageID},
+		})
+		return
+	}
+
+	if initiatorBalance.Amount <= 0 && targetBalance.Amount <= 0 {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          groupID,
+			Text:            "Both players have no balance to duel for!",
+			ReplyParameters: &models.ReplyParameters{MessageID: messageID},
+		})
+		delete(c.pendingDuels, groupID)
+		return
+	}
+
+	// Send dice roll
+	diceMsg, err := b.SendDice(ctx, &bot.SendDiceParams{
+		ChatID: groupID,
+		Emoji:  "🎲",
+	})
+	if err != nil {
+		log.Printf("error sending dice: %v", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          groupID,
+			Text:            "Error sending dice roll.",
+			ReplyParameters: &models.ReplyParameters{MessageID: messageID},
+		})
+		return
+	}
+
+	// Process the dice result immediately
+	if diceMsg.Dice == nil {
+		log.Printf("dice message has no dice field")
+		return
+	}
+
+	diceValue := diceMsg.Dice.Value
+
+	// Get current balances
+	initiatorAmount := initiatorBalance.Amount
+	targetAmount := targetBalance.Amount
+
+	// Dice roll: even = initiator wins, odd = target wins
+	var winnerName string
+
+	if diceValue%2 == 0 {
+		// Even - initiator wins
+		winnerName = fmt.Sprintf("User_%d", pendingDuel.InitiatorID)
+	} else {
+		// Odd - target wins
+		winnerName = pendingDuel.TargetName
+	}
+
+	// Transfer balances atomically - winner takes loser's entire balance
+	err = c.db.Transaction(func(tx *gorm.DB) error {
+		if diceValue%2 == 0 {
+			// Even - initiator wins, take target's balance
+			if targetAmount > 0 {
+				if err := c.db.TransferBalance(tx, pendingDuel.TargetID, pendingDuel.InitiatorID, groupID, targetAmount); err != nil {
+					return err
+				}
+			}
+		} else {
+			// Odd - target wins, take initiator's balance
+			if initiatorAmount > 0 {
+				if err := c.db.TransferBalance(tx, pendingDuel.InitiatorID, pendingDuel.TargetID, groupID, initiatorAmount); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("error transferring balance: %v", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:          groupID,
+			Text:            "Error transferring balance.",
+			ReplyParameters: &models.ReplyParameters{MessageID: messageID},
+		})
+		return
+	}
+
+	resultType := "odd"
+	if diceValue%2 == 0 {
+		resultType = "even"
+	}
+
+	// Calculate amount won (loser's balance) and loser's name
+	var amountWon int64
+	var loserName string
+	if diceValue%2 == 0 {
+		amountWon = targetAmount
+		loserName = pendingDuel.TargetName
+	} else {
+		amountWon = initiatorAmount
+		loserName = pendingDuel.InitiatorName
+	}
+
+	// Wait for dice animation to play out
+	time.Sleep(5 * time.Second)
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: groupID,
+		Text: fmt.Sprintf("🎲 %d (%s)!\n\n@%s wins %d$ from @%s!",
+			diceValue, resultType, winnerName, amountWon, loserName),
+	})
+}
+
+func (c *casinoController) declineDuelHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+
+	groupID := update.Message.Chat.ID
+	targetID := update.Message.From.ID
+
+	c.pendingDuelsMu.Lock()
+	defer c.pendingDuelsMu.Unlock()
+
+	pendingDuel, exists := c.pendingDuels[groupID]
+	if !exists {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "No pending duel in this group.",
+		})
+		return
+	}
+
+	if pendingDuel.TargetID != targetID {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "This duel is not for you!",
+		})
+		return
+	}
+
+	delete(c.pendingDuels, groupID)
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: groupID,
+		Text:   fmt.Sprintf("@%s chickened out of the duel!", pendingDuel.TargetName),
+	})
+}
+
+func (c *casinoController) cancelDuelHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+
+	groupID := update.Message.Chat.ID
+	initiatorID := update.Message.From.ID
+
+	c.pendingDuelsMu.Lock()
+	defer c.pendingDuelsMu.Unlock()
+
+	pendingDuel, exists := c.pendingDuels[groupID]
+	if !exists {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "No pending duel in this group.",
+		})
+		return
+	}
+
+	if pendingDuel.InitiatorID != initiatorID {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "You didn't initiate this duel!",
+		})
+		return
+	}
+
+	delete(c.pendingDuels, groupID)
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: groupID,
+		Text:   fmt.Sprintf("Duel against @%s has been cancelled.", pendingDuel.TargetName),
+	})
+}
+
+func (c *casinoController) addBalanceHandler(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+
+	groupID := update.Message.Chat.ID
+
+	args := strings.TrimSpace(strings.TrimPrefix(update.Message.Text, "/addBalance"))
+	if args == "" {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "Usage: /addBalance <username> <amount>",
+		})
+		return
+	}
+
+	parts := strings.Fields(args)
+	if len(parts) != 2 {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "Usage: /addBalance <username> <amount>",
+		})
+		return
+	}
+
+	targetUsername := strings.TrimPrefix(parts[0], "@")
+	var amount int64
+	if _, err := fmt.Sscanf(parts[1], "%d", &amount); err != nil {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "Invalid amount.",
+		})
+		return
+	}
+
+	balances, err := c.db.GetBalancesByGroup(groupID)
+	if err != nil {
+		log.Printf("error getting balances: %v", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "Error getting balances.",
+		})
+		return
+	}
+
+	var targetID int64
+	var targetFound bool
+	for _, bal := range balances {
+		stat, err := c.db.GetOrCreateStats(bal.UserID, groupID, "")
+		if err != nil {
+			continue
+		}
+		if stat.Username == targetUsername {
+			targetID = bal.UserID
+			targetFound = true
+			break
+		}
+	}
+
+	if !targetFound {
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "User not found.",
+		})
+		return
+	}
+
+	err = c.db.Transaction(func(tx *gorm.DB) error {
+		return c.db.UpdateBalance(tx, targetID, groupID, int(amount))
+	})
+	if err != nil {
+		log.Printf("error updating balance: %v", err)
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: groupID,
+			Text:   "Error updating balance.",
+		})
+		return
+	}
+
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: groupID,
+		Text:   fmt.Sprintf("Added %d$ to @%s.", amount, targetUsername),
+	})
+}
+
+func (c *casinoController) handleSlotMachine(ctx context.Context, b *bot.Bot, update *models.Update, v slotMachineValue) {
 	userID := update.Message.From.ID
 	username := update.Message.From.Username
 	groupID := update.Message.Chat.ID
