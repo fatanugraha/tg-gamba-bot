@@ -1,0 +1,5 @@
+> @fata.nugraha (id=1)
+/balance
+
+> @bot
+No balances yet.

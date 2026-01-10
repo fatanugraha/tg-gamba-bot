@@ -1,0 +1,11 @@
+> @fata.nugraha (id=1)
+/stats
+
+> @bot
+No stats yet.
+
+> @admin (id=2)
+/addBalance @fata.nugraha 100
+
+> @bot
+User not found.
