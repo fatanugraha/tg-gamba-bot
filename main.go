@@ -60,6 +60,7 @@ func main() {
 type BotInterface interface {
 	SendMessage(ctx context.Context, params *bot.SendMessageParams) (*models.Message, error)
 	SendDice(ctx context.Context, params *bot.SendDiceParams) (*models.Message, error)
+	DeleteMessage(ctx context.Context, params *bot.DeleteMessageParams) (bool, error)
 }
 
 type casinoController struct {
@@ -622,6 +623,7 @@ func (c *casinoController) handleSlotMachine(ctx context.Context, b BotInterface
 	userID := update.Message.From.ID
 	username := update.Message.From.Username
 	groupID := update.Message.Chat.ID
+	messageID := update.Message.ID
 
 	if _, err := c.db.GetOrCreateStats(userID, groupID, username); err != nil {
 		log.Printf("error getting user: %v", err)
@@ -650,6 +652,18 @@ func (c *casinoController) handleSlotMachine(ctx context.Context, b BotInterface
 
 	left, center, right := v.left(), v.center(), v.right()
 	if left != center || center != right {
+		// Non-winning spin - delete the message after 5 seconds
+		go func() {
+			time.Sleep(5 * time.Second)
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if _, err := b.DeleteMessage(deleteCtx, &bot.DeleteMessageParams{
+				ChatID:    groupID,
+				MessageID: messageID,
+			}); err != nil {
+				log.Printf("error deleting message: %v", err)
+			}
+		}()
 		return
 	}
 

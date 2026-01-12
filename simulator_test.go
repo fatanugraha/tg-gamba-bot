@@ -128,6 +128,11 @@ func (m *MockBot) SendDice(ctx context.Context, params *bot.SendDiceParams) (*mo
 	return msg, nil
 }
 
+func (m *MockBot) DeleteMessage(ctx context.Context, params *bot.DeleteMessageParams) (bool, error) {
+	// Mock implementation - just return true (deleted successfully)
+	return true, nil
+}
+
 func (m *MockBot) NextDiceValue() int {
 	if len(m.diceValues) == 0 {
 		return 1
