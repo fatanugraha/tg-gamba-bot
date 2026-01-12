@@ -748,9 +748,9 @@ func (c *casinoController) handleSlotMachine(ctx context.Context, b BotInterface
 
 	left, center, right := v.left(), v.center(), v.right()
 	if left != center || center != right {
-		// Non-winning spin - delete the message after 5 seconds
+		// Non-winning spin - delete the message after 1 minute
 		go func() {
-			time.Sleep(5 * time.Second)
+			time.Sleep(1 * time.Minute)
 			deleteCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if _, err := b.DeleteMessage(deleteCtx, &bot.DeleteMessageParams{
