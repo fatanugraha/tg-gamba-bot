@@ -63,20 +63,106 @@ type BotInterface interface {
 	DeleteMessage(ctx context.Context, params *bot.DeleteMessageParams) (bool, error)
 }
 
+// dailyLimitKey is a composite key for tracking daily slot machine usage
+type dailyLimitKey struct {
+	GroupID int64
+	UserID  int64
+	Date    string // YYYY-MM-DD format
+}
+
+// dailyLimitEntry tracks the number of slot machine plays for a user in a group on a specific date
+type dailyLimitEntry struct {
+	Count int
+}
+
 type casinoController struct {
 	token          string
 	username       string
 	db             *DB
 	pendingDuels   map[int64]*PendingDuel // groupID -> PendingDuel
 	pendingDuelsMu sync.RWMutex
+	dailyLimits    map[dailyLimitKey]*dailyLimitEntry
+	dailyLimitsMu  sync.RWMutex
 }
 
 func newCasinoController(token string, username string, db *DB) *casinoController {
-	return &casinoController{
+	c := &casinoController{
 		token:        token,
 		username:     username,
 		db:           db,
 		pendingDuels: make(map[int64]*PendingDuel),
+		dailyLimits:  make(map[dailyLimitKey]*dailyLimitEntry),
+	}
+	// Start periodic cleanup of old daily limit entries
+	go c.cleanupOldDailyLimits()
+	return c
+}
+
+// getDateKey returns the current date in YYYY-MM-DD format
+func getDateKey() string {
+	return time.Now().Format("2006-01-02")
+}
+
+// checkAndIncrementDailyLimit checks if the user has exceeded the daily limit
+// and increments the count if not. Returns true if the user can play, false otherwise.
+func (c *casinoController) checkAndIncrementDailyLimit(userID, groupID int64) bool {
+	c.dailyLimitsMu.Lock()
+	defer c.dailyLimitsMu.Unlock()
+
+	key := dailyLimitKey{
+		GroupID: groupID,
+		UserID:  userID,
+		Date:    getDateKey(),
+	}
+
+	entry, exists := c.dailyLimits[key]
+	if !exists {
+		c.dailyLimits[key] = &dailyLimitEntry{Count: 1}
+		return true
+	}
+
+	if entry.Count >= 5 {
+		return false
+	}
+
+	entry.Count++
+	return true
+}
+
+// getRemainingPlays returns the number of remaining plays for the user today
+func (c *casinoController) getRemainingPlays(userID, groupID int64) int {
+	c.dailyLimitsMu.RLock()
+	defer c.dailyLimitsMu.RUnlock()
+
+	key := dailyLimitKey{
+		GroupID: groupID,
+		UserID:  userID,
+		Date:    getDateKey(),
+	}
+
+	entry, exists := c.dailyLimits[key]
+	if !exists {
+		return 5
+	}
+
+	return 5 - entry.Count
+}
+
+// cleanupOldDailyLimits removes entries from previous days
+// Runs periodically to prevent unbounded memory growth
+func (c *casinoController) cleanupOldDailyLimits() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		c.dailyLimitsMu.Lock()
+		today := getDateKey()
+		for key := range c.dailyLimits {
+			if key.Date != today {
+				delete(c.dailyLimits, key)
+			}
+		}
+		c.dailyLimitsMu.Unlock()
 	}
 }
 
@@ -624,6 +710,16 @@ func (c *casinoController) handleSlotMachine(ctx context.Context, b BotInterface
 	username := update.Message.From.Username
 	groupID := update.Message.Chat.ID
 	messageID := update.Message.ID
+
+	// Check daily limit
+	if !c.checkAndIncrementDailyLimit(userID, groupID) {
+		// Delete the slot machine message silently
+		b.DeleteMessage(ctx, &bot.DeleteMessageParams{
+			ChatID:    groupID,
+			MessageID: messageID,
+		})
+		return
+	}
 
 	if _, err := c.db.GetOrCreateStats(userID, groupID, username); err != nil {
 		log.Printf("error getting user: %v", err)
