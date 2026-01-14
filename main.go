@@ -42,7 +42,6 @@ func main() {
 		bot.WithMessageTextHandler("/acceptDuel", bot.MatchTypeExact, svc.wrapHandler(svc.acceptDuelHandler)),
 		bot.WithMessageTextHandler("/declineDuel", bot.MatchTypeExact, svc.wrapHandler(svc.declineDuelHandler)),
 		bot.WithMessageTextHandler("/cancelDuel", bot.MatchTypeExact, svc.wrapHandler(svc.cancelDuelHandler)),
-		bot.WithMessageTextHandler("/addBalance", bot.MatchTypePrefix, svc.wrapHandler(svc.addBalanceHandler)),
 		bot.WithDefaultHandler(svc.wrapHandler(svc.defaultHandler)),
 		bot.WithWorkers(1),
 	)
@@ -531,91 +530,6 @@ func (c *casinoController) cancelDuelHandler(ctx context.Context, b BotInterface
 	b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: groupID,
 		Text:   fmt.Sprintf("Duel against @%s has been cancelled.", pendingDuel.TargetName),
-	})
-}
-
-func (c *casinoController) addBalanceHandler(ctx context.Context, b BotInterface, update *models.Update) {
-	if update.Message == nil {
-		return
-	}
-
-	groupID := update.Message.Chat.ID
-
-	args := strings.TrimSpace(strings.TrimPrefix(update.Message.Text, "/addBalance"))
-	if args == "" {
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: groupID,
-			Text:   "Usage: /addBalance <username> <amount>",
-		})
-		return
-	}
-
-	parts := strings.Fields(args)
-	if len(parts) != 2 {
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: groupID,
-			Text:   "Usage: /addBalance <username> <amount>",
-		})
-		return
-	}
-
-	targetUsername := strings.TrimPrefix(parts[0], "@")
-	var amount int64
-	if _, err := fmt.Sscanf(parts[1], "%d", &amount); err != nil {
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: groupID,
-			Text:   "Invalid amount.",
-		})
-		return
-	}
-
-	balances, err := c.db.GetBalancesByGroup(groupID)
-	if err != nil {
-		log.Printf("error getting balances: %v", err)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: groupID,
-			Text:   "Error getting balances.",
-		})
-		return
-	}
-
-	var targetID int64
-	var targetFound bool
-	for _, bal := range balances {
-		stat, err := c.db.GetOrCreateStats(bal.UserID, groupID, "")
-		if err != nil {
-			continue
-		}
-		if stat.Username == targetUsername {
-			targetID = bal.UserID
-			targetFound = true
-			break
-		}
-	}
-
-	if !targetFound {
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: groupID,
-			Text:   "User not found.",
-		})
-		return
-	}
-
-	err = c.db.Transaction(func(tx *gorm.DB) error {
-		return c.db.UpdateBalance(tx, targetID, groupID, int(amount))
-	})
-	if err != nil {
-		log.Printf("error updating balance: %v", err)
-		b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: groupID,
-			Text:   "Error updating balance.",
-		})
-		return
-	}
-
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: groupID,
-		Text:   fmt.Sprintf("Added %d$ to @%s.", amount, targetUsername),
 	})
 }
 

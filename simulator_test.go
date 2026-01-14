@@ -306,8 +306,6 @@ func runScenario(t *testing.T, scenario TestScenario, svc *casinoController) {
 		svc.declineDuelHandler(ctx, mockBot, update)
 	case command == "/cancelDuel":
 		svc.cancelDuelHandler(ctx, mockBot, update)
-	case strings.HasPrefix(command, "/addBalance"):
-		svc.addBalanceHandler(ctx, mockBot, update)
 	case strings.HasPrefix(command, "/slots"):
 		// Handle slot machine
 		update.Message.Dice = &models.Dice{
@@ -399,8 +397,6 @@ func TestTxtFiles(t *testing.T) {
 					svc.declineDuelHandler(ctx, mockBot, update)
 				case command == "/cancelDuel":
 					svc.cancelDuelHandler(ctx, mockBot, update)
-				case strings.HasPrefix(command, "/addBalance"):
-					svc.addBalanceHandler(ctx, mockBot, update)
 				default:
 					svc.defaultHandler(ctx, mockBot, update)
 				}
